@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MotoTaximetro Tosagua PRO</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; background: #000; color: white; overflow-x: hidden; }
+        #map { height: 200px; width: 100%; border-bottom: 3px solid #ffcc00; }
+        .container { padding: 10px; max-width: 450px; margin: auto; }
+        
+        .display-panel { background: #1a1a1a; border-radius: 15px; padding: 15px; text-align: center; border: 2px solid #444; margin-bottom: 10px; }
+        .fare { font-size: 4rem; font-weight: bold; color: #ffcc00; margin: 5px 0; line-height: 1; }
+        .stats { display: flex; justify-content: space-around; font-size: 0.85rem; color: #aaa; margin-bottom: 5px; }
+        
+        .section-title { font-size: 0.7rem; color: #ffcc00; text-transform: uppercase; margin-bottom: 8px; text-align: left; letter-spacing: 1px; }
+        .controls { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 15px; }
+        
+        button { padding: 12px 5px; border: none; border-radius: 8px; font-weight: bold; font-size: 0.8rem; cursor: pointer; transition: 0.2s; }
+        
+        /* Botones Principales */
+        .btn-start { background: #28a745; color: white; grid-column: span 3; font-size: 1.2rem; height: 60px; }
+        .btn-stop { background: #dc3545; color: white; grid-column: span 3; font-size: 1.2rem; height: 60px; display: none; }
+        
+        /* Botones de Recargo */
+        .btn-extra { background: #333; color: white; border: 1px solid #555; }
+        .btn-active { background: #ffcc00 !important; color: black !important; border-color: #fff; }
+        
+        .header { text-align: center; padding: 10px; background: #ffcc00; color: black; font-weight: 900; font-size: 0.9rem; }
+        .footer-info { font-size: 0.7rem; color: #666; text-align: center; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="header">MOTOTAXI TOSAGUA - UNIDAD DE CONTROL</div>
+<div id="map"></div>
+
+<div class="container">
+    <div class="display-panel">
+        <div class="stats">
+            <span>KM: <b id="dist" style="color:white">0.00</b></span>
+            <span>ESTADO: <b id="status" style="color:#ffcc00">PARADO</b></span>
+        </div>
+        <div class="fare">$<span id="fare">0.75</span></div>
+        <div id="extra-info" style="font-size: 0.75rem; color: #888;">CARRERA MÍNIMA</div>
+    </div>
+
+    <div class="section-title">Servicios Especiales / Recargos</div>
+    <div class="controls">
+        <button id="btnNocturno" class="btn-extra" onclick="toggleExtra('nocturno', 0.25)">🌙 NOCTURNO</button>
+        <button id="btnEstancilla" class="btn-extra" onclick="toggleExtra('estancilla', 0.50)">🏘️ ESTANCILLA</button>
+        <button id="btnTambo" class="btn-extra" onclick="toggleExtra('tambo', 0.75)">🚜 EL TAMBO</button>
+        <button id="btnMatapalo" class="btn-extra" onclick="toggleExtra('matapalo', 0.60)">🌳 MATAPALO</button>
+        <button id="btnCarga" class="btn-extra" onclick="toggleExtra('carga', 0.25)">📦 BULTOS</button>
+        <button id="btnLluvia" class="btn-extra" onclick="toggleExtra('lluvia', 0.25)">🌧️ LLUVIA</button>
+    </div>
+
+    <div class="controls">
+        <button id="btnStart" class="btn-start" onclick="iniciarCarrera()">INICIAR VIAJE</button>
+        <button id="btnStop" class="btn-stop" onclick="finalizarCarrera()">FINALIZAR Y COBRAR</button>
+    </div>
+
+    <div class="footer-info">Precisión GPS: <span id="acc">--</span>m | Tosagua, Manabí</div>
+</div>
+
+<script>
+    let map, marker, path, watchID;
+    let distance = 0;
+    let lastPos = null;
+    let extras = { nocturno: 0, estancilla: 0, tambo: 0, matapalo: 0, carga: 0, lluvia: 0 };
+    
+    // CONFIGURACIÓN DE TARIFAS
+    const MINIMA = 0.75;
+    const VALOR_KM = 0.35; 
+
+    // Inicializar Mapa centrado en el centro de Tosagua
+    map = L.map('map', { zoomControl: false }).setView([-0.693, -80.235], 16); 
+    L.tileLayer('https://{s}.tile.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png').addTo(map);
+    path = L.polyline([], {color: '#ffcc00', weight: 5}).addTo(map);
+    marker = L.circleMarker([0,0], {radius: 8, color: '#ffcc00', fillOpacity: 1}).addTo(map);
+
+    function iniciarCarrera() {
+        distance = 0;
+        lastPos = null;
+        path.setLatLngs([]);
+        document.getElementById('status').innerText = "EN RUTA";
+        document.getElementById('btnStart').style.display = "none";
+        document.getElementById('btnStop').style.display = "block";
+        
+        if (navigator.geolocation) {
+            watchID = navigator.geolocation.watchPosition(actualizarRuta, errorGPS, {
+                enableHighAccuracy: true,
+                maximumAge: 1000
+            });
+        }
+    }
+
+    function actualizarRuta(pos) {
+        const { latitude, longitude, accuracy } = pos.coords;
+        const currentPos = [latitude, longitude];
+        document.getElementById('acc').innerText = Math.round(accuracy);
+        
+        if (lastPos) {
+            let d = calculateDistance(lastPos[0], lastPos[1], latitude, longitude);
+            if (d > 0.003) { // Ignora movimientos menores a 3 metros (ruido GPS)
+                distance += d;
+            }
+        }
+        
+        lastPos = currentPos;
+        marker.setLatLng(currentPos);
+        path.addLatLng(currentPos);
+        map.panTo(currentPos);
+        actualizarPantalla();
+    }
+
+    function toggleExtra(tipo, valor) {
+        extras[tipo] = extras[tipo] === 0 ? valor : 0;
+        document.getElementById('btn' + tipo.charAt(0).toUpperCase() + tipo.slice(1)).classList.toggle('btn-active');
+        actualizarPantalla();
+    }
+
+    function actualizarPantalla() {
+        let subtotal = (distance * VALOR_KM);
+        let total = (subtotal < 0.20) ? MINIMA : (MINIMA + subtotal);
+        
+        // Sumar todos los extras activos
+        let sumaExtras = Object.values(extras).reduce((a, b) => a + b, 0);
+        total += sumaExtras;
+        
+        document.getElementById('dist').innerText = distance.toFixed(2);
+        document.getElementById('fare').innerText = total.toFixed(2);
+        document.getElementById('extra-info').innerText = (subtotal < 0.20) ? "TARIFA MÍNIMA" : "TARIFA POR RECORRIDO";
+    }
+
+    function finalizarCarrera() {
+        navigator.geolocation.clearWatch(watchID);
+        let valorFinal = document.getElementById('fare').innerText;
+        alert("RESUMEN DE VIAJE\nDistancia: " + distance.toFixed(2) + " km\nTOTAL A COBRAR: $" + valorFinal);
+        
+        // Reset de la App
+        document.getElementById('status').innerText = "PARADO";
+        document.getElementById('btnStart').style.display = "block";
+        document.getElementById('btnStop').style.display = "none";
+    }
+
+    function calculateDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371;
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                  Math.sin(dLon/2) * Math.sin(dLon/2);
+        return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
+    }
+
+    function errorGPS() { alert("Por favor activa el GPS y da permisos de ubicación."); }
+</script>
+</body>
+</html>
